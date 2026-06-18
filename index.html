@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Evolution Simulator</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html,body{width:100%;height:100%;overflow:hidden;background:#060810;font-family:'Courier New',monospace}
+  </style>
+</head>
+<body>
+
+<!-- ── CORE ── -->
+<script>
+const config = {
+  mutationRate:  0.05,
+  foodSpawnRate: 3,
+  foodEnergy:    30,
+  maxPopulation: 200,
+  worldWidth:    window.innerWidth,
+  worldHeight:   window.innerHeight
+};
+
+const state = {
+  creatures: [], food: [],
+  ticks: 0, generation: 0, running: false,
+  // history: one entry per 60 ticks, capped at 300
+  // each entry: { speed, size, sense, pop }
+  history: [],
+
+  tick() {
+    this.ticks++;
+    _spawnFood();
+    _updateCreatures();
+    if (this.ticks % 60 === 0) _recordHistory();
+  },
+  reset() {
+    this.creatures = []; this.food = [];
+    this.ticks = 0; this.generation = 0;
+    this.running = false; this.history = [];
+    _init();
+  },
+  spawnFood() { _spawnFood(); }
+};
+
+function _recordHistory() {
+  const pop = state.creatures.length;
+  if (pop === 0) { state.history.push({ speed:0, size:0, sense:0, pop:0 }); return; }
+  let ts=0, tsi=0, tse=0;
+  for (const c of state.creatures) { ts+=c.speed; tsi+=c.size; tse+=c.sense; }
+  state.history.push({ speed:ts/pop, size:tsi/pop, sense:tse/pop, pop });
+  if (state.history.length > 300) state.history.shift();
+}
+
+function _rand(a,b){ return Math.random()*(b-a)+a; }
+function _clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+function _mutate(v,min,max){
+  const d=(Math.random()*2-1)*config.mutationRate*(max-min);
+  if(min===0&&max===360) return ((v+d)%360+360)%360;
+  return _clamp(v+d,min,max);
+}
+
+function _makeCreature(x,y,genes,gen){
+  const g=genes||{size:_rand(1,3),speed:_rand(1,3),sense:_rand(20,60),hue:_rand(0,360)};
+  const a=Math.random()*Math.PI*2;
+  return {
+    x:x??Math.random()*config.worldWidth, y:y??Math.random()*config.worldHeight,
+    vx:Math.cos(a)*g.speed, vy:Math.sin(a)*g.speed,
+    energy:60, size:g.size, speed:g.speed, sense:g.sense, hue:g.hue,
+    age:0, generation:gen||0, eating:0
+  };
+}
+
+function _reproduce(p){
+  p.energy -= 50;
+  const child = _makeCreature(
+    p.x+(Math.random()-.5)*12, p.y+(Math.random()-.5)*12,
+    {size:_mutate(p.size,1,5),speed:_mutate(p.speed,1,5),
+     sense:_mutate(p.sense,10,100),hue:_mutate(p.hue,0,360)},
+    p.generation+1
+  );
+  child.energy=42; return child;
+}
+
+function _spawnFood(){
+  for(let i=0;i<config.foodSpawnRate;i++)
+    state.food.push({x:Math.random()*config.worldWidth,y:Math.random()*config.worldHeight,energy:config.foodEnergy});
+  if(state.food.length>700) state.food.splice(0,state.food.length-700);
+}
+
+function _updateCreatures(){
+  const toAdd=[], deadIdx=[], eaten=new Set();
+  for(let i=0;i<state.creatures.length;i++){
+    const c=state.creatures[i];
+    c.age++; if(c.eating>0) c.eating--;
+    c.energy -= 0.05 + c.size*c.size*0.015 + c.speed*c.speed*0.018;
+    if(c.age>800) c.energy -= (c.age-800)*0.002;
+
+    let target=null, best=c.sense;
+    for(let j=0;j<state.food.length;j++){
+      if(eaten.has(j)) continue;
+      const f=state.food[j],dx=f.x-c.x,dy=f.y-c.y,d=Math.sqrt(dx*dx+dy*dy);
+      if(d<best){best=d;target={j,f,dx,dy,d};}
+    }
+    if(target){
+      const inv=c.speed/target.d;
+      c.vx=c.vx*0.3+target.dx*inv*0.7; c.vy=c.vy*0.3+target.dy*inv*0.7;
+      if(target.d<c.size*3+3){ c.energy+=target.f.energy*(0.8+c.size*0.08); c.eating=10; eaten.add(target.j); }
+    } else {
+      c.vx+=(Math.random()-.5)*0.35; c.vy+=(Math.random()-.5)*0.35;
+      const m=Math.sqrt(c.vx*c.vx+c.vy*c.vy);
+      if(m>c.speed){c.vx=c.vx/m*c.speed;c.vy=c.vy/m*c.speed;}
+    }
+    c.x+=c.vx; c.y+=c.vy;
+    const r=c.size*3;
+    if(c.x<r){c.x=r;c.vx*=-.85;} if(c.x>config.worldWidth-r){c.x=config.worldWidth-r;c.vx*=-.85;}
+    if(c.y<r){c.y=r;c.vy*=-.85;} if(c.y>config.worldHeight-r){c.y=config.worldHeight-r;c.vy*=-.85;}
+    if(c.energy>160) c.energy=160;
+    if(c.energy>=100&&state.creatures.length+toAdd.length<config.maxPopulation){
+      const child=_reproduce(c); toAdd.push(child);
+      if(child.generation>state.generation) state.generation=child.generation;
+    }
+    if(c.energy<=0) deadIdx.push(i);
+  }
+  [...eaten].sort((a,b)=>b-a).forEach(i=>state.food.splice(i,1));
+  for(let i=deadIdx.length-1;i>=0;i--) state.creatures.splice(deadIdx[i],1);
+  toAdd.forEach(c=>state.creatures.push(c));
+  if(state.creatures.length===0) _init();
+}
+
+function _init(){
+  for(let i=0;i<20;i++) state.creatures.push(_makeCreature());
+  for(let i=0;i<120;i++)
+    state.food.push({x:Math.random()*config.worldWidth,y:Math.random()*config.worldHeight,energy:config.foodEnergy});
+}
+_init();
+</script>
+
+
+<!-- ── RENDERER ── -->
+<script>
+const canvas=document.createElement('canvas');
+Object.assign(canvas.style,{position:'fixed',inset:'0',width:'100%',height:'100%',zIndex:'0'});
+document.body.prepend(canvas);
+const ctx=canvas.getContext('2d');
+function resize(){canvas.width=config.worldWidth=window.innerWidth;canvas.height=config.worldHeight=window.innerHeight;}
+window.addEventListener('resize',resize); resize();
+
+function render(){
+  requestAnimationFrame(render);
+  if(!state.running) return;
+  state.tick();
+  ctx.fillStyle='#060810'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  for(const f of state.food){
+    ctx.beginPath(); ctx.shadowBlur=10; ctx.shadowColor='#3fdf70';
+    ctx.fillStyle='#3fdf70'; ctx.arc(f.x,f.y,3,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+  for(const c of state.creatures){
+    const r=c.size*3;
+    ctx.beginPath(); ctx.strokeStyle=`hsla(${c.hue},60%,70%,0.07)`; ctx.lineWidth=1;
+    ctx.arc(c.x,c.y,c.sense,0,Math.PI*2); ctx.stroke();
+    const mag=Math.hypot(c.vx,c.vy);
+    if(mag>0.01){
+      ctx.beginPath(); ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=1;
+      ctx.moveTo(c.x,c.y); ctx.lineTo(c.x+c.vx/mag*(r+7),c.y+c.vy/mag*(r+7)); ctx.stroke();
+    }
+    if(c.eating>0){
+      ctx.beginPath(); ctx.strokeStyle=`rgba(255,240,100,${c.eating/10*0.9})`; ctx.lineWidth=2.5;
+      ctx.arc(c.x,c.y,r+5,0,Math.PI*2); ctx.stroke();
+    }
+    ctx.beginPath(); ctx.fillStyle=`hsl(${c.hue},78%,56%)`; ctx.arc(c.x,c.y,r,0,Math.PI*2); ctx.fill();
+    const ef=Math.min(c.energy/160,1);
+    ctx.beginPath(); ctx.strokeStyle=`hsl(${ef*120},90%,55%)`; ctx.lineWidth=2.2;
+    ctx.arc(c.x,c.y,r+2.5,-Math.PI/2,-Math.PI/2+ef*Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.fillStyle='rgba(255,255,255,0.55)';
+    ctx.arc(c.x,c.y,Math.max(1.5,r*0.2),0,Math.PI*2); ctx.fill();
+  }
+}
+render();
+</script>
+
+
+<!-- ── UI ── -->
+<script>
+(function(){
+const CSS=`
+  :root{--bg:rgba(6,8,16,0.88);--border:rgba(0,220,180,0.18);--accent:#00dbb4;--dim:rgba(255,255,255,0.35);--text:#e8eef4;--pw:248px;}
+  .sp{position:absolute;background:var(--bg);color:var(--text);font-family:'Courier New',monospace;font-size:12px;padding:14px 16px;border-radius:6px;border:1px solid var(--border);box-shadow:0 0 24px rgba(0,200,160,0.07),inset 0 0 0 1px rgba(255,255,255,0.03);pointer-events:auto;z-index:100;user-select:none;}
+  .sp-title{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);opacity:.7;margin-bottom:11px;}
+  #sp-stats{top:14px;left:14px;width:var(--pw);}
+  .sr{display:flex;align-items:center;margin-bottom:7px;gap:6px;}
+  .sr-label{color:var(--dim);font-size:11px;width:72px;flex-shrink:0;}
+  .sr-track{flex:1;height:3px;background:rgba(255,255,255,0.07);border-radius:2px;overflow:hidden;}
+  .sr-fill{height:100%;border-radius:2px;transition:width .5s;}
+  .sr-val{font-size:12px;font-weight:bold;min-width:36px;text-align:right;}
+  .sp-div{height:1px;background:rgba(255,255,255,0.06);margin:9px 0;}
+  #sim-status{text-align:center;font-size:11px;color:var(--dim);margin-top:6px;letter-spacing:.05em;}
+  #sp-ctrl{top:14px;right:14px;width:272px;}
+  .cr{margin-bottom:11px;}
+  .cr-label{display:block;color:var(--dim);font-size:11px;margin-bottom:5px;}
+  .cr-row{display:flex;align-items:center;gap:8px;}
+  .cr-row input[type=range]{flex:1;cursor:pointer;accent-color:var(--accent);height:3px;}
+  .cr-val{font-size:12px;min-width:34px;text-align:right;}
+  .btns{display:flex;gap:7px;margin-top:14px;}
+  .sb{flex:1;background:rgba(0,220,180,0.07);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;letter-spacing:.04em;transition:background .15s,border-color .15s;}
+  .sb:hover{background:rgba(0,220,180,0.15);border-color:rgba(0,220,180,0.4);}
+  .sb:active{background:rgba(0,220,180,0.22);}
+  #sp-legend{bottom:14px;left:14px;width:var(--pw);}
+  .lg-row{display:flex;align-items:flex-start;gap:9px;margin-bottom:8px;font-size:11px;color:#b0bec8;line-height:1.45;}
+  .lg-icon{font-size:14px;flex-shrink:0;width:18px;text-align:center;margin-top:1px;}
+  #sp-graph{bottom:14px;right:14px;width:300px;}
+  #graph-canvas{display:block;width:100%;border-radius:3px;margin-top:4px;}
+  .graph-legend{display:flex;gap:14px;margin-top:8px;}
+  .gl-item{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--dim);}
+  .gl-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+`;
+const st=document.createElement('style'); st.textContent=CSS; document.head.appendChild(st);
+
+const wrap=document.createElement('div');
+Object.assign(wrap.style,{position:'absolute',top:'0',left:'0',width:'100%',height:'100%',pointerEvents:'none'});
+document.body.appendChild(wrap);
+
+// Stats panel
+const sStats=document.createElement('div'); sStats.id='sp-stats'; sStats.className='sp';
+sStats.innerHTML=`
+  <div class="sp-title">Population</div>
+  <div class="sr"><span class="sr-label">Population</span><div class="sr-track"><div class="sr-fill" id="b-pop" style="background:#4af"></div></div><span class="sr-val" id="v-pop">0</span></div>
+  <div class="sr"><span class="sr-label">Generation</span><div class="sr-track"><div class="sr-fill" id="b-gen" style="background:#0db"></div></div><span class="sr-val" id="v-gen" style="color:#0db">0</span></div>
+  <div class="sr"><span class="sr-label">Tick</span><span class="sr-val" id="v-tick" style="color:rgba(255,255,255,0.3)">0</span></div>
+  <div class="sp-div"></div>
+  <div class="sp-title">Gene Averages</div>
+  <div class="sr"><span class="sr-label">⚡ Speed</span><div class="sr-track"><div class="sr-fill" id="b-spd" style="background:#f84"></div></div><span class="sr-val" id="v-spd">—</span></div>
+  <div class="sr"><span class="sr-label">📦 Size</span><div class="sr-track"><div class="sr-fill" id="b-siz" style="background:#a5f"></div></div><span class="sr-val" id="v-siz">—</span></div>
+  <div class="sr"><span class="sr-label">👁 Sense</span><div class="sr-track"><div class="sr-fill" id="b-sen" style="background:#4fa"></div></div><span class="sr-val" id="v-sen">—</span></div>
+  <div class="sr"><span class="sr-label">⚡ Avg NRG</span><div class="sr-track"><div class="sr-fill" id="b-nrg" style="background:#ff6"></div></div><span class="sr-val" id="v-nrg">—</span></div>
+  <div class="sp-div"></div>
+  <div id="sim-status">● READY</div>
+`;
+wrap.appendChild(sStats);
+
+// Controls
+const sCtrl=document.createElement('div'); sCtrl.id='sp-ctrl'; sCtrl.className='sp';
+sCtrl.innerHTML=`
+  <div class="sp-title">Controls</div>
+  <div class="cr"><label class="cr-label">🧬 Mutation — gene shift per birth</label>
+    <div class="cr-row"><input type="range" id="sl-mut" min="0" max="0.2" step="0.01" value="${config.mutationRate}"><span id="vl-mut" class="cr-val">${config.mutationRate}</span></div></div>
+  <div class="cr"><label class="cr-label">🌿 Food Spawn — pellets per tick</label>
+    <div class="cr-row"><input type="range" id="sl-food" min="1" max="10" step="1" value="${config.foodSpawnRate}"><span id="vl-food" class="cr-val">${config.foodSpawnRate}</span></div></div>
+  <div class="cr"><label class="cr-label">👥 Max Population — reproduction cap</label>
+    <div class="cr-row"><input type="range" id="sl-pop" min="50" max="500" step="10" value="${config.maxPopulation}"><span id="vl-pop" class="cr-val">${config.maxPopulation}</span></div></div>
+  <div class="btns">
+    <button id="btn-go" class="sb">▶ Start</button>
+    <button id="btn-pause" class="sb">⏸ Pause</button>
+    <button id="btn-reset" class="sb">↺ Reset</button>
+  </div>
+`;
+wrap.appendChild(sCtrl);
+
+// Legend
+const sLeg=document.createElement('div'); sLeg.id='sp-legend'; sLeg.className='sp';
+sLeg.innerHTML=`
+  <div class="sp-title">Visual Key</div>
+  <div class="lg-row"><span class="lg-icon">●</span><span><b>Circle</b> = creature. Colour = mutated hue gene.</span></div>
+  <div class="lg-row"><span class="lg-icon" style="color:#3fdf70">●</span><span><b>Green dot</b> = food pellet (30 energy)</span></div>
+  <div class="lg-row"><span class="lg-icon">○</span><span><b>Arc ring</b> = energy. Green = full, red = dying.</span></div>
+  <div class="lg-row"><span class="lg-icon" style="color:rgba(255,240,100,0.9)">◌</span><span><b>Yellow flash</b> = eating food</span></div>
+  <div class="lg-row"><span class="lg-icon" style="opacity:.4">○</span><span><b>Faint ring</b> = sense radius.</span></div>
+  <div class="lg-row" style="color:rgba(255,255,255,0.25);font-size:10px;margin-top:2px">Big+fast = high energy cost. Reproduces at 100 energy.</div>
+`;
+wrap.appendChild(sLeg);
+
+// Graph panel
+const sGraph=document.createElement('div'); sGraph.id='sp-graph'; sGraph.className='sp';
+sGraph.innerHTML=`
+  <div class="sp-title">Gene History</div>
+  <canvas id="graph-canvas" height="110"></canvas>
+  <div class="graph-legend">
+    <div class="gl-item"><div class="gl-dot" style="background:#f84"></div>Speed</div>
+    <div class="gl-item"><div class="gl-dot" style="background:#a5f"></div>Size</div>
+    <div class="gl-item"><div class="gl-dot" style="background:#4fa"></div>Sense ÷20</div>
+    <div class="gl-item"><div class="gl-dot" style="background:#4af"></div>Pop ÷40</div>
+  </div>
+`;
+wrap.appendChild(sGraph);
+
+// Graph drawing
+const gc = document.getElementById('graph-canvas');
+
+function drawGraph(){
+  const h = state.history;
+  const W = gc.offsetWidth * window.devicePixelRatio || 268;
+  const H = 110;
+  if(gc.width !== W){ gc.width = W; }
+  gc.height = H;
+  const gx = gc.getContext('2d');
+  gx.clearRect(0,0,W,H);
+
+  // Background grid
+  gx.strokeStyle='rgba(255,255,255,0.05)'; gx.lineWidth=1;
+  for(let i=1;i<5;i++){
+    const y=Math.round(H/5*i)+0.5;
+    gx.beginPath(); gx.moveTo(0,y); gx.lineTo(W,y); gx.stroke();
+  }
+
+  if(h.length < 2) return;
+
+  // Draw a line for a given accessor and color
+  function drawLine(accessor, color, scale){
+    gx.beginPath(); gx.strokeStyle=color; gx.lineWidth=1.5; gx.lineJoin='round';
+    for(let i=0;i<h.length;i++){
+      const x = i/(h.length-1)*W;
+      const val = Math.min(accessor(h[i])*scale, 1);
+      const y = H - val*(H-4) - 2;
+      i===0 ? gx.moveTo(x,y) : gx.lineTo(x,y);
+    }
+    gx.stroke();
+  }
+
+  // All normalised to 0–1 on the same axis (scale factor brings to 0–5 range → /5)
+  drawLine(d=>d.speed,       '#f8a040', 1/5);
+  drawLine(d=>d.size,        '#a050ff', 1/5);
+  drawLine(d=>d.sense/20,    '#40ff90', 1/5);   // sense 10-100 → /20 → 0.5-5 → /5
+  drawLine(d=>d.pop/config.maxPopulation*5, 'rgba(70,170,255,0.6)', 1/5);
+}
+
+// Bindings
+const $=id=>document.getElementById(id);
+$('sl-mut').oninput=e=>{ config.mutationRate=parseFloat(e.target.value); $('vl-mut').textContent=config.mutationRate.toFixed(2); };
+$('sl-food').oninput=e=>{ config.foodSpawnRate=+e.target.value; $('vl-food').textContent=config.foodSpawnRate; };
+$('sl-pop').oninput=e=>{ config.maxPopulation=+e.target.value; $('vl-pop').textContent=config.maxPopulation; };
+
+function setStatus(t,c){ const el=$('sim-status'); el.textContent=t; el.style.color=c; }
+$('btn-go').onclick=()=>{ state.running=true; setStatus('● RUNNING','#00dbb4'); };
+$('btn-pause').onclick=()=>{ state.running=false; setStatus('⏸ PAUSED','#f8a030'); };
+$('btn-reset').onclick=()=>{ state.reset(); setStatus('● READY','rgba(255,255,255,0.35)'); refresh(); };
+
+// Stats refresh + graph — simple interval, no modulo games
+let lastTick=-1;
+function refresh(){
+  const pop=state.creatures.length;
+  $('v-pop').textContent=pop; $('b-pop').style.width=Math.min(pop/config.maxPopulation*100,100)+'%';
+  $('v-gen').textContent=state.generation; $('b-gen').style.width=Math.min(state.generation/50*100,100)+'%';
+  $('v-tick').textContent=state.ticks;
+  if(pop>0){
+    let ts=0,tsi=0,tse=0,te=0;
+    for(const c of state.creatures){ts+=c.speed;tsi+=c.size;tse+=c.sense;te+=c.energy;}
+    const a=1/pop;
+    $('v-spd').textContent=(ts*a).toFixed(2); $('b-spd').style.width=Math.min(ts*a/5*100,100)+'%';
+    $('v-siz').textContent=(tsi*a).toFixed(2); $('b-siz').style.width=Math.min(tsi*a/5*100,100)+'%';
+    $('v-sen').textContent=(tse*a).toFixed(1); $('b-sen').style.width=Math.min(tse*a/100*100,100)+'%';
+    $('v-nrg').textContent=(te*a).toFixed(0); $('b-nrg').style.width=Math.min(te*a/160*100,100)+'%';
+  } else {
+    ['v-spd','v-siz','v-sen','v-nrg'].forEach(id=>$(id).textContent='—');
+    ['b-spd','b-siz','b-sen','b-nrg'].forEach(id=>$(id).style.width='0%');
+  }
+  drawGraph();
+}
+
+setInterval(()=>{ if(state.ticks!==lastTick){ lastTick=state.ticks; refresh(); } }, 150);
+})();
+</script>
+</body>
+</html>
